@@ -1,0 +1,234 @@
+#include <WiFi.h>
+#include "ThingSpeak.h"
+#include <LiquidCrystal_I2C.h>
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+#include <Wire.h>
+#include "RTClib.h"
+
+RTC_DS3231 rtc;
+
+const int jamMulai = 33;     // Pin untuk button Jam Mulai
+const int jamSelesai = 35;  // Pin untuk button Jam Selesai
+
+bool lastButtonStateMulai = HIGH;    // Menyimpan status terakhir dari button Jam Mulai
+bool lastButtonStateSelesai = HIGH;  // Menyimpan status terakhir dari button Jam Selesai
+
+bool isMulaiClicked = false;
+bool isSelesaiClicked = false;
+
+TinyGPSPlus gps;  // The TinyGPS++ object
+String lat_data, lng_data;
+#define GPS_BAUDRATE 9600
+// Deklarasi objek Serial untuk komunikasi GPS
+HardwareSerial SerialGPS(1);
+
+const char ssid[] = "ha";       // Wi-Fi SSID
+const char pass[] = "halidyaya";  // Wi-Fi Password
+WiFiClient client;
+
+unsigned long myChannelNumber = 2567587;
+const char *myWriteAPIKey = "QL8EIZ0P7RJCCJA7";
+
+unsigned long previousMillis_ts = 0;
+const long ts_update_interval = 20000;  // Update data every 20s
+LiquidCrystal_I2C lcd(0x27, 16, 2);     // Set the LCD I2C address
+
+
+void setup() {
+
+  lcd.init();
+  lcd.backlight();
+  lcd.print("Initializing...");
+
+  Serial.begin(115200);
+  SerialGPS.begin(GPS_BAUDRATE, SERIAL_8N1, 16, 17);  // Serial2 for GPS UART
+
+  WiFi.mode(WIFI_STA);
+  pinMode(jamMulai, INPUT_PULLUP);    // Menggunakan internal pull-up resistor
+  pinMode(jamSelesai, INPUT_PULLUP);  // Menggunakan internal pull-up resistor
+  if (!rtc.begin()) {
+    Serial.println("RTC tidak ditemukan!");
+    while (1)
+      ;
+  }
+
+  if (rtc.lostPower()) {
+    Serial.println("RTC kehilangan daya, mengatur ulang waktu!");
+    // Mengatur ulang waktu ke tanggal dan waktu sekarang
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+  ThingSpeak.begin(client);  // Initialize ThingSpeak
+  connectToWiFi();
+  lcd.clear();
+}
+
+void loop() {
+  bool btnJamMulai = digitalRead(jamMulai);
+  bool btnJamSelesai = digitalRead(jamSelesai);
+
+  // Membaca data dari GPS
+  while (SerialGPS.available() > 0) {
+    gps.encode(SerialGPS.read());
+  }
+
+  // Jika data valid, tampilkan latitude dan longitude
+  if (gps.location.isValid()) {
+    Serial.print("Latitude: ");
+    Serial.println(gps.location.lat(), 6);
+    lat_data = String(gps.location.lat(), 8);
+    lcd.setCursor(0, 0);
+    lcd.print("Lat:");
+    lcd.print(lat_data);
+    ThingSpeak.setField(1, lat_data);  // Field for latitude
+    Serial.print("Longitude: ");
+    Serial.println(gps.location.lng(), 6);
+    lng_data = String(gps.location.lng(), 8);
+    lcd.setCursor(0, 1);
+    lcd.print("Lng:");
+    lcd.print(lng_data);
+    ThingSpeak.setField(2, lng_data);  // Field for longitude
+
+  } else {
+    Serial.println("Mencari sinyal GPS...");
+    lcd.setCursor(0, 0);
+    lcd.print("Mencari sinyal...");
+  }
+
+  // Deteksi perubahan status button dari HIGH ke LOW (tombol ditekan)
+  if (lastButtonStateMulai == HIGH && btnJamMulai == LOW) {
+    if (!isMulaiClicked && !isSelesaiClicked) {
+      lcd.clear();
+      isMulaiClicked = true;
+      DateTime now = rtc.now();
+      char tjamMulai[20];
+      sprintf(tjamMulai, "%04d/%02d/%02d %02d:%02d:%02d", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+      Serial.println(tjamMulai);
+      ThingSpeak.setField(3, tjamMulai);
+      lcd.setCursor(0, 0);
+      lcd.print(tjamMulai);
+      int x = ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+      if (x == 200) {
+        Serial.println("Successfully updated the channel.");
+      } else {
+        Serial.println("Failed to update the channel. HTTP error code: " + String(x));
+      }
+      delay(2000);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Hati-Hati");
+      lcd.setCursor(0, 1);
+      lcd.print("Data tersimpan");
+      delay(1000);
+      lcd.clear();
+    } else {
+      Serial.println("Gagal Klik Tombol Mulai");
+    }
+  }
+
+  // Deteksi perubahan status button Jam Selesai dari HIGH ke LOW (tombol ditekan)
+  if (lastButtonStateSelesai == HIGH && btnJamSelesai == LOW) {
+    if (isMulaiClicked && !isSelesaiClicked) {
+      isSelesaiClicked = true;
+      DateTime now = rtc.now();
+      char tJamSelesai[20];
+      sprintf(tJamSelesai, "%04d/%02d/%02d %02d:%02d:%02d", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+      Serial.println(tJamSelesai);
+      ThingSpeak.setField(4, tJamSelesai);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(tJamSelesai);
+      delay(2000);
+      lcd.clear();
+      lcd.setCursor(0, 1);
+      lcd.print("Data tersimpan");
+      delay(1000);
+      lcd.clear();
+      // Reset status setelah selesai
+      isMulaiClicked = false;
+      isSelesaiClicked = false;
+    } else {
+      Serial.println("Gagal Klik Tombol Selesai");
+    }
+  }
+
+
+  lastButtonStateMulai = btnJamMulai;
+  lastButtonStateSelesai = btnJamSelesai;
+  delay(50);  // Debounce delay untuk menghindari multiple reading
+
+
+
+
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis_ts >= ts_update_interval) {
+    previousMillis_ts = currentMillis;
+    if (WiFi.status() != WL_CONNECTED) {
+      reconnectWiFi();
+    }
+    int x = ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+    if (x == 200) {
+      Serial.println("Successfully updated the channel.");
+    } else {
+      Serial.println("Failed to update the channel. HTTP error code: " + String(x));
+    }
+    delay(2000);
+    Serial.println();
+  }
+}
+
+void connectToWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.print("Attempting to connect to SSID: ");
+    lcd.setCursor(0, 0);
+    lcd.print("Connecting....");
+    lcd.setCursor(0, 1);
+    lcd.print(ssid);
+    Serial.println(ssid);
+    WiFi.begin(ssid, pass);
+    int i = 0;
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+      ++i;
+
+      if (i == 20) {
+        i = 0;
+        Serial.println("\nFailed to connect.");
+        break;
+      }
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      lcd.clear();
+
+      Serial.println("\nConnected!");
+      lcd.print("Connected!");
+    }
+    delay(3000);
+  }
+}
+
+void reconnectWiFi() {
+  Serial.print("Attempting to reconnect to SSID: ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, pass);
+  int i = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    ++i;
+
+    if (i == 20) {
+      i = 0;
+      Serial.println("\nFailed to reconnect.");
+      break;
+    }
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nReconnected!");
+  }
+}
